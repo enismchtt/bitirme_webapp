@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg-900 text-slate-100 font-sans antialiased;
+  background-image:
+    radial-gradient(at 10% -10%, rgba(124, 58, 237, 0.18) 0px, transparent 50%),
+    radial-gradient(at 90% 0%, rgba(34, 211, 238, 0.10) 0px, transparent 50%),
+    radial-gradient(at 50% 100%, rgba(124, 58, 237, 0.08) 0px, transparent 60%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  .glass {
+    @apply bg-bg-800/70 backdrop-blur-xl border border-white/5 shadow-2xl shadow-black/30;
+  }
+  .card {
+    @apply glass rounded-2xl p-5;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl
+           font-medium text-sm transition-all duration-150
+           border border-white/5 bg-white/5 hover:bg-white/10
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply text-white border-transparent
+           bg-gradient-to-r from-accent-500 to-cyan-glow
+           hover:brightness-110 active:brightness-95
+           shadow-lg shadow-accent-500/30;
+  }
+  .input {
+    @apply bg-bg-700/60 border border-white/10 rounded-xl px-3 py-2 text-sm
+           text-slate-100 placeholder-slate-500 outline-none
+           focus:ring-2 focus:ring-accent-400/60 focus:border-accent-400/60
+           transition-all;
+  }
+  .label {
+    @apply text-xs uppercase tracking-wider text-slate-400 font-medium;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs
+           bg-white/5 border border-white/10 text-slate-300;
+  }
+}
+
+/* Recharts styling overrides */
+.recharts-cartesian-axis-tick-value {
+  fill: #94a3b8 !important;
+  font-size: 11px;
+}
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.06) !important;
+}
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+/* Markdown body for AI interpretation */
+.prose-ai h2 {
+  @apply text-base font-semibold text-white mt-4 mb-2 flex items-center gap-2;
+}
+.prose-ai h2::before {
+  content: '';
+  @apply inline-block w-1.5 h-4 rounded-full bg-gradient-to-b from-accent-400 to-cyan-glow;
+}
+.prose-ai p {
+  @apply text-sm text-slate-300 leading-relaxed mb-3;
+}
+.prose-ai ul {
+  @apply text-sm text-slate-300 leading-relaxed space-y-1 mb-3 list-disc list-inside;
+}
+.prose-ai strong {
+  @apply text-white;
+}
+.prose-ai em {
+  @apply text-slate-400 text-xs;
+}
+.prose-ai code {
+  @apply font-mono text-xs px-1 py-0.5 rounded bg-white/10;
+}
+.prose-ai blockquote {
+  @apply border-l-2 border-accent-400/50 pl-3 text-xs text-slate-400 italic my-2;
+}

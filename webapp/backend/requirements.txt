@@ -1,0 +1,13 @@
+# Pin only the new packages; the existing project venv already supplies
+# darts, xgboost, binance, pandas, numpy. Install on top of that venv.
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.30
+python-dotenv>=1.0
+pydantic>=2.9
+google-generativeai>=0.8
+# Optional explicit pins below — uncomment if creating a fresh venv:
+ pandas>=2.0
+ numpy>=1.24
+ darts>=0.31
+ xgboost>=2.0
+ python-binance>=1.0
