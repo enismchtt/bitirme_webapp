@@ -1,61 +1,65 @@
-"""XGBoost forecasting — uses the team's research-best feature set.
+"""Multi-model inference forecaster.
 
-For 1d the best combination is ``['rsi', 'macd', 'log_ret_close']``
-(see ``config.BEST_FEATURE_SET``).  We mirror the team's training pipeline
-(``src/forecast.py``):
+Every request runs all three models (xg_boost, lstm, cnn_lstm) and returns
+per-model result series.  No online training — weights come from saved .pt
+checkpoints.
 
-* Target = ``log_ret_close`` with 7 past lags.
-* Each past covariate (``rsi``, ``macd``) gets its own 7-step lag block.
-* XGBoost hyperparameters come from ``config.XGB_KWARGS`` and match
-  ``darts.models.XGBModel(lags=7, lags_past_covariates=7, …)``.
+Target: ``target_log_ret_close_next_1d`` = next calendar day's log_ret_close.
 
-We drive XGBoost directly (no ``darts.historical_forecasts``) so each
-request stays in the millisecond range.
+Window convention (mirrors training):
+    For eval day T at DataFrame position t:
+        X = df[feature_cols].iloc[t-30 : t]   (30 rows, ending at date T-1)
+        y = log_ret_close at T = log(close[T] / close[T-1])
+        predicted_close[T] = close[T-1] * exp(y_pred)
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 
 import config
-from services import binance_fetcher
+from services import binance_fetcher, inference
 
 logger = logging.getLogger(__name__)
 
-LAG = config.XGB_LAGS  # 7
-TARGET = "log_ret_close"
+SEQ = config.SEQUENCE_LENGTH
+MIN_HISTORY = SEQ + config.INDICATOR_WARMUP  # 56 rows before first eval day
 
+
+# ── Data structures ────────────────────────────────────────────────────────
 
 @dataclass
 class HistoricalPoint:
     date: str
     actual_close: float
-    predicted_close: float
     actual_log_ret: float
+    predicted_close: float        # 1-step prediction
     predicted_log_ret: float
-    # Autoregressive (compound) variant: at t = start the model sees the
-    # last 7 actual log-returns, but at t > start it also feeds its own
-    # earlier predictions back as input. This drifts away from the actual
-    # over time but produces a "real forecast" looking line that does not
-    # appear to lag the actual price.
-    predicted_close_ar: float
+    predicted_close_ar: float     # autoregressive chain
     predicted_log_ret_ar: float
+
+
+@dataclass
+class HistoricalModelResult:
+    features: list[str]
+    rmse_log_ret: float
+    rmse_price: float
+    direction_accuracy: float
+    mape: float
+    points: list[HistoricalPoint]
 
 
 @dataclass
 class HistoricalResult:
     coin: str
     timeframe: str
-    points: list[HistoricalPoint]
-    rmse_log_ret: float
-    rmse_price: float
-    direction_accuracy: float
-    mape: float
-    features: list[str]
+    start: str
+    end: str
+    training_note: str
+    models: dict[str, HistoricalModelResult] = field(default_factory=dict)
 
 
 @dataclass
@@ -66,234 +70,249 @@ class ForecastPoint:
 
 
 @dataclass
+class ForecastModelResult:
+    features: list[str]
+    points: list[ForecastPoint]
+
+
+@dataclass
 class ForecastResult:
     coin: str
     timeframe: str
+    days: int
     last_known_date: str
     last_known_close: float
-    points: list[ForecastPoint]
-    features: list[str]
+    training_note: str
+    models: dict[str, ForecastModelResult] = field(default_factory=dict)
 
 
-def _features_for(timeframe: str) -> list[str]:
-    feats = config.BEST_FEATURE_SET.get(timeframe)
-    if not feats:
-        raise ValueError(f"No BEST_FEATURE_SET configured for timeframe={timeframe}")
-    return feats
+# ── Shared data loading ────────────────────────────────────────────────────
 
-
-def _xgb_model() -> xgb.XGBRegressor:
-    kw = config.XGB_KWARGS
-    return xgb.XGBRegressor(
-        n_estimators=kw["n_estimators"],
-        learning_rate=kw["learning_rate"],
-        max_leaves=kw["max_leaves"],
-        min_child_weight=kw["min_child_weight"],
-        subsample=kw["subsample"],
-        colsample_bytree=kw["colsample_bytree"],
-        gamma=kw["gamma"],
-        reg_alpha=kw["reg_alpha"],
-        reg_lambda=kw["reg_lambda"],
-        random_state=kw["random_state"],
-        n_jobs=kw["n_jobs"],
-        tree_method="hist",
-        verbosity=0,
-    )
-
-
-def _load_clean(coin: str, timeframe: str, needed: list[str]) -> pd.DataFrame:
-    df = binance_fetcher.get_candles(coin, timeframe)
+def _load_df(coin: str, feature_cols: list[str]) -> pd.DataFrame:
+    """Fetch + enrich candles, drop NaN on required columns."""
+    df = binance_fetcher.get_candles(coin)
     if df.empty:
-        raise RuntimeError(f"No data for {coin}")
-    # +60 row warmup for indicators (RSI 14, MACD 26, BBands 20).
-    df = df.tail(config.HISTORY_DAYS + 60).copy()
+        raise RuntimeError(f"No data returned for {coin}")
     df = df.replace([np.inf, -np.inf], np.nan)
-    missing = [c for c in needed if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"Missing required columns from fetcher: {missing}")
-    df = df.dropna(subset=needed)
+    needed = list({*feature_cols, "close", "log_ret_close"})
+    df = df.dropna(subset=needed).copy()
     return df
 
 
-def _build_lag_matrix(
-    df: pd.DataFrame,
-    features: list[str],
-    target: str = TARGET,
-    lag: int = LAG,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """X[i] = [target lags 1..L] + [cov_1 lags 1..L] + …; y[i] = target[i+L]."""
-    cols = [target] + [f for f in features if f != target]
-    arr = df[cols].to_numpy(dtype=np.float64)
-    n, ncol = arr.shape
-    if n < lag + 1:
-        raise ValueError(f"Need at least {lag + 1} rows, got {n}")
-    parts = [np.lib.stride_tricks.sliding_window_view(arr[:, c], lag)[:-1]
-             for c in range(ncol)]
-    X = np.concatenate(parts, axis=1)
-    y = arr[lag:, 0]
-    target_dates = df.index.to_numpy()[lag:]
-    return X, y, target_dates
+# ── Per-model historical inference ────────────────────────────────────────
 
+def _historical_one_model(
+    model_name: str,
+    coin: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> HistoricalModelResult:
+    feature_cols = config.BEST_FEATURE_SET[model_name]
+    df = _load_df(coin, feature_cols)
+
+    # Locate eval rows: dates strictly in [start, end].
+    mask = (df.index >= start) & (df.index <= end)
+    eval_dates = df.index[mask]
+    if len(eval_dates) == 0:
+        raise ValueError(
+            f"No candles in {start.date()}..{end.date()} after dropna. "
+            f"Available: {df.index.min().date()}..{df.index.max().date()}"
+        )
+
+    # Positional indices (integer positions in df, not DatetimeIndex labels).
+    eval_positions = [df.index.get_loc(d) for d in eval_dates]
+    t_0 = eval_positions[0]
+
+    if t_0 < MIN_HISTORY:
+        raise ValueError(
+            f"Not enough history before {start.date()} for model '{model_name}'. "
+            f"Need at least {MIN_HISTORY} valid rows before start "
+            f"(got {t_0}). Move start date later."
+        )
+
+    # ── 1-step predictions ─────────────────────────────────────────────────
+    preds_1step: list[float] = []
+    for t in eval_positions:
+        window = df[feature_cols].iloc[t - SEQ: t].to_numpy(dtype=np.float32)
+        preds_1step.append(inference.predict_one_step(model_name, window))
+
+    # ── Autoregressive chain ───────────────────────────────────────────────
+    preds_ar = inference.roll_forward_historical_ar(
+        model_name, df, feature_cols, eval_positions
+    )
+
+    # ── Assemble points ────────────────────────────────────────────────────
+    # AR close is compounded from the close on the day before the first eval day.
+    close_before_start = float(df["close"].iloc[t_0 - 1])
+    running_ar_close = close_before_start
+
+    points: list[HistoricalPoint] = []
+    for k, t in enumerate(eval_positions):
+        actual_close = float(df["close"].iloc[t])
+        actual_log_ret = float(df["log_ret_close"].iloc[t])
+        prev_close = float(df["close"].iloc[t - 1])
+
+        pred_lr_1step = preds_1step[k]
+        predicted_close_1step = prev_close * np.exp(pred_lr_1step)
+
+        pred_lr_ar = preds_ar[k]
+        running_ar_close *= np.exp(pred_lr_ar)
+
+        points.append(HistoricalPoint(
+            date=df.index[t].strftime("%Y-%m-%d"),
+            actual_close=actual_close,
+            actual_log_ret=actual_log_ret,
+            predicted_close=float(predicted_close_1step),
+            predicted_log_ret=float(pred_lr_1step),
+            predicted_close_ar=float(running_ar_close),
+            predicted_log_ret_ar=float(pred_lr_ar),
+        ))
+
+    # ── Metrics (1-step only) ──────────────────────────────────────────────
+    preds_arr = np.array(preds_1step)
+    actuals_arr = np.array([p.actual_log_ret for p in points])
+    actual_close_arr = np.array([p.actual_close for p in points])
+    pred_close_arr = np.array([p.predicted_close for p in points])
+
+    rmse_log_ret = float(np.sqrt(np.mean((preds_arr - actuals_arr) ** 2)))
+    direction_acc = float(np.mean(np.sign(preds_arr) == np.sign(actuals_arr)))
+
+    mask_price = (
+        (actual_close_arr != 0)
+        & ~np.isnan(actual_close_arr)
+        & ~np.isnan(pred_close_arr)
+    )
+    if mask_price.any():
+        rmse_price = float(np.sqrt(np.mean((actual_close_arr[mask_price] - pred_close_arr[mask_price]) ** 2)))
+        mape = float(np.mean(np.abs((actual_close_arr[mask_price] - pred_close_arr[mask_price]) / actual_close_arr[mask_price])) * 100)
+    else:
+        rmse_price = float("nan")
+        mape = float("nan")
+
+    return HistoricalModelResult(
+        features=feature_cols,
+        rmse_log_ret=rmse_log_ret,
+        rmse_price=rmse_price,
+        direction_accuracy=direction_acc,
+        mape=mape,
+        points=points,
+    )
+
+
+# ── Per-model future inference ─────────────────────────────────────────────
+
+def _forecast_one_model(
+    model_name: str,
+    coin: str,
+    days: int,
+    anchor_close: float,
+    anchor_date: pd.Timestamp,
+    df: pd.DataFrame,
+) -> ForecastModelResult:
+    feature_cols = config.BEST_FEATURE_SET[model_name]
+
+    # Drop NaN on this model's features (shared df may need re-filtering).
+    needed = list({*feature_cols, "close", "log_ret_close"})
+    df_m = df.dropna(subset=needed).copy()
+
+    # Compute anchor position in the (possibly filtered) per-model df.
+    try:
+        pos = df_m.index.get_loc(anchor_date)
+    except KeyError:
+        # If anchor date dropped out after dropna, fall back to last available row.
+        pos = len(df_m) - 1
+        anchor_close = float(df_m["close"].iloc[pos])
+
+    if pos < SEQ:
+        raise ValueError(
+            f"Not enough history for model '{model_name}' anchor at {anchor_date.date()}."
+        )
+
+    pred_log_rets = inference.roll_forward_future_ar(
+        model_name, df_m, feature_cols, anchor_pos=pos, steps=days
+    )
+
+    running_close = anchor_close
+    points: list[ForecastPoint] = []
+    for step, pred_lr in enumerate(pred_log_rets):
+        running_close = running_close * float(np.exp(pred_lr))
+        date = (anchor_date + pd.Timedelta(days=step + 1)).strftime("%Y-%m-%d")
+        points.append(ForecastPoint(
+            date=date,
+            predicted_close=float(running_close),
+            predicted_log_ret=float(pred_lr),
+        ))
+
+    return ForecastModelResult(features=feature_cols, points=points)
+
+
+# ── Public API ─────────────────────────────────────────────────────────────
 
 def historical_predictions(
     coin: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
-    timeframe: str = "1d",
 ) -> HistoricalResult:
-    features = _features_for(timeframe)
-    logger.info("Predicting %s %s with features=%s", coin, timeframe, features)
-
-    df = _load_clean(coin, timeframe, features)
     start = pd.Timestamp(start).normalize()
     end = pd.Timestamp(end).normalize()
     if start >= end:
         raise ValueError("start must be earlier than end")
 
-    X, y, target_dates = _build_lag_matrix(df, features)
-    close_full = df["close"].to_numpy()
-
-    in_range = np.where(
-        (target_dates >= np.datetime64(start)) & (target_dates <= np.datetime64(end))
-    )[0]
-    if len(in_range) == 0:
-        raise ValueError(
-            f"No candles fall in {start.date()} .. {end.date()}. "
-            f"Available range: {pd.Timestamp(target_dates[0]).date()} "
-            f".. {pd.Timestamp(target_dates[-1]).date()}"
-        )
-
-    train_end = int(in_range[0])
-    if train_end < 30:
-        raise ValueError(
-            f"Not enough history before {start.date()} to train (need ≥30 rows)."
-        )
-
-    model = _xgb_model()
-    logger.info("Training XGBoost on %d samples × %d features (before %s)",
-                train_end, X.shape[1], start.date())
-    model.fit(X[:train_end], y[:train_end])
-
-    sel = in_range
-    preds = model.predict(X[sel])
-    actual_lr = y[sel]
-    actual_close_arr = close_full[LAG:][sel]
-    prev_close_arr = close_full[LAG - 1 + sel]
-    predicted_close = prev_close_arr * np.exp(preds)
-    point_dates = target_dates[sel]
-
-    # --- Autoregressive variant ---
-    # Build a sliding window from the actual values right before `sel[0]`
-    # then roll forward feeding the model its own previous predictions.
-    cols = [TARGET] + [f for f in features if f != TARGET]
-    arr_full = df[cols].to_numpy(dtype=np.float64)
-    # Index of the first prediction day in `arr_full`:
-    first_target_idx = LAG + int(sel[0])
-    # The lag window is arr_full[first_target_idx - LAG : first_target_idx]
-    ar_window = arr_full[first_target_idx - LAG: first_target_idx].copy()
-    preds_ar: list[float] = []
-    for _ in range(len(sel)):
-        feats = np.concatenate([ar_window[:, c] for c in range(ar_window.shape[1])])
-        p = float(model.predict(feats.reshape(1, -1))[0])
-        preds_ar.append(p)
-        new_row = ar_window[-1].copy()
-        new_row[0] = p
-        ar_window = np.vstack([ar_window[1:], new_row])
-    preds_ar_arr = np.array(preds_ar)
-
-    # Compound close starting from the last actual close before `start`.
-    start_close = float(close_full[first_target_idx - 1])
-    predicted_close_ar = start_close * np.exp(np.cumsum(preds_ar_arr))
-
-    points = [
-        HistoricalPoint(
-            date=pd.Timestamp(d).strftime("%Y-%m-%d"),
-            actual_close=float(ac),
-            predicted_close=float(pc),
-            actual_log_ret=float(ar),
-            predicted_log_ret=float(pr),
-            predicted_close_ar=float(pca),
-            predicted_log_ret_ar=float(par),
-        )
-        for d, ac, pc, ar, pr, pca, par in zip(
-            point_dates, actual_close_arr, predicted_close, actual_lr, preds,
-            predicted_close_ar, preds_ar_arr,
-        )
-    ]
-
-    rmse_log_ret = float(np.sqrt(np.mean((preds - actual_lr) ** 2)))
-    direction_acc = float(np.mean(np.sign(preds) == np.sign(actual_lr)))
-    mask = (actual_close_arr != 0) & ~np.isnan(actual_close_arr) & ~np.isnan(predicted_close)
-    if mask.any():
-        rmse_price = float(np.sqrt(np.mean((actual_close_arr[mask] - predicted_close[mask]) ** 2)))
-        mape = float(np.mean(np.abs((actual_close_arr[mask] - predicted_close[mask]) / actual_close_arr[mask])) * 100)
-    else:
-        rmse_price = float("nan")
-        mape = float("nan")
-
-    return HistoricalResult(
+    result = HistoricalResult(
         coin=coin,
-        timeframe=timeframe,
-        points=points,
-        rmse_log_ret=rmse_log_ret,
-        rmse_price=rmse_price,
-        direction_accuracy=direction_acc,
-        mape=mape,
-        features=features,
+        timeframe="1d",
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        training_note=config.TRAINING_NOTE,
     )
+
+    for model_name in config.SUPPORTED_MODELS:
+        logger.info("Historical inference: %s / %s", coin, model_name)
+        try:
+            result.models[model_name] = _historical_one_model(model_name, coin, start, end)
+        except Exception as exc:
+            logger.exception("Historical inference failed for %s/%s", coin, model_name)
+            raise
+
+    return result
 
 
 def future_forecast(
     coin: str,
     days: int = 7,
-    timeframe: str = "1d",
 ) -> ForecastResult:
-    if days < 1 or days > 30:
-        raise ValueError("days must be between 1 and 30")
+    if not (config.FORECAST_DAYS_MIN <= days <= config.FORECAST_DAYS_MAX):
+        raise ValueError(f"days must be between {config.FORECAST_DAYS_MIN} and {config.FORECAST_DAYS_MAX}")
 
-    features = _features_for(timeframe)
-    logger.info("Forecasting %s %s with features=%s for %d days", coin, timeframe, features, days)
+    # Load a broad df (all features union) to determine anchor.
+    all_features = list({f for cols in config.BEST_FEATURE_SET.values() for f in cols})
+    df_broad = _load_df(coin, all_features)
 
-    df = _load_clean(coin, timeframe, features)
-    X, y, _ = _build_lag_matrix(df, features)
+    anchor_date: pd.Timestamp = df_broad.index.max()
+    anchor_close = float(df_broad["close"].iloc[-1])
 
-    model = _xgb_model()
-    logger.info("Training XGBoost on %d samples × %d features (future)",
-                len(X), X.shape[1])
-    model.fit(X, y)
-
-    cols = [TARGET] + [f for f in features if f != TARGET]
-    last_window = df[cols].to_numpy(dtype=np.float64)[-LAG:].copy()
-
-    last_known_date = df.index.max()
-    last_known_close = float(df["close"].iloc[-1])
-
-    running_close = last_known_close
-    points: list[ForecastPoint] = []
-    for step in range(days):
-        feats = np.concatenate([last_window[:, c] for c in range(last_window.shape[1])])
-        pred_lr = float(model.predict(feats.reshape(1, -1))[0])
-
-        running_close = running_close * float(np.exp(pred_lr))
-        points.append(
-            ForecastPoint(
-                date=(last_known_date + pd.Timedelta(days=step + 1)).strftime("%Y-%m-%d"),
-                predicted_close=running_close,
-                predicted_log_ret=pred_lr,
-            )
-        )
-
-        # Slide: target gets the new prediction, covariates carry forward
-        # (a conservative choice since we have no future RSI/MACD).
-        new_row = last_window[-1].copy()
-        new_row[0] = pred_lr
-        last_window = np.vstack([last_window[1:], new_row])
-
-    return ForecastResult(
+    result = ForecastResult(
         coin=coin,
-        timeframe=timeframe,
-        last_known_date=last_known_date.strftime("%Y-%m-%d"),
-        last_known_close=last_known_close,
-        points=points,
-        features=features,
+        timeframe="1d",
+        days=days,
+        last_known_date=anchor_date.strftime("%Y-%m-%d"),
+        last_known_close=anchor_close,
+        training_note=config.TRAINING_NOTE,
     )
+
+    for model_name in config.SUPPORTED_MODELS:
+        logger.info("Future inference: %s / %s / %d days", coin, model_name, days)
+        try:
+            result.models[model_name] = _forecast_one_model(
+                model_name=model_name,
+                coin=coin,
+                days=days,
+                anchor_close=anchor_close,
+                anchor_date=anchor_date,
+                df=df_broad,
+            )
+        except Exception as exc:
+            logger.exception("Future inference failed for %s/%s", coin, model_name)
+            raise
+
+    return result

@@ -5,6 +5,7 @@ import DateRangePicker from './DateRangePicker.jsx'
 import MetricCard from './MetricCard.jsx'
 import PriceChart from './PriceChart.jsx'
 import LogRetChart from './LogRetChart.jsx'
+import ModelFilter, { MODEL_STROKE, MODEL_LABELS } from './ModelFilter.jsx'
 import { getCoinInfo, getHistorical } from '../api.js'
 
 function shiftDays(dateStr, n) {
@@ -13,6 +14,8 @@ function shiftDays(dateStr, n) {
   return d.toISOString().slice(0, 10)
 }
 
+const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm']
+
 export default function HistoricalView({ coins, coin, onCoinChange }) {
   const [coinInfo, setCoinInfo] = useState(null)
   const [start, setStart] = useState('')
@@ -20,8 +23,8 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [selectedModel, setSelectedModel] = useState('xg_boost')
 
-  // Load coin date bounds whenever coin changes.
   useEffect(() => {
     let cancelled = false
     setCoinInfo(null)
@@ -32,10 +35,8 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
         if (cancelled) return
         setCoinInfo(info)
         const latest = info.latest_date
-        const defaultStart = shiftDays(latest, -30)
-        const defaultEnd = shiftDays(latest, -1)
-        setStart(defaultStart)
-        setEnd(defaultEnd)
+        setStart(shiftDays(latest, -30))
+        setEnd(shiftDays(latest, -1))
       })
       .catch((e) => {
         if (cancelled) return
@@ -44,10 +45,10 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
     return () => { cancelled = true }
   }, [coin])
 
+  // Require 30-day window + 26 indicator warmup before start.
   const minStartDate = useMemo(() => {
     if (!coinInfo) return undefined
-    // Need >= 7+30 = 37 days of training history.
-    return shiftDays(coinInfo.earliest_date, 40)
+    return shiftDays(coinInfo.earliest_date, 56)
   }, [coinInfo])
 
   async function run() {
@@ -58,6 +59,11 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
     try {
       const res = await getHistorical({ coin, start, end })
       setData(res)
+      // Default to first model with results.
+      const available = SUPPORTED_MODELS.filter((m) => res.models?.[m])
+      if (available.length && !available.includes(selectedModel)) {
+        setSelectedModel(available[0])
+      }
     } catch (e) {
       setError(e?.response?.data?.detail || e.message)
     } finally {
@@ -65,7 +71,11 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
     }
   }
 
-  const days = data?.points?.length || 0
+  const modelResult = data?.models?.[selectedModel]
+  const points = modelResult?.points ?? []
+  const days = points.length
+  const stroke = MODEL_STROKE[selectedModel] ?? '#a78bfa'
+  const availableModels = data ? SUPPORTED_MODELS.filter((m) => data.models?.[m]) : []
 
   return (
     <div className="space-y-6">
@@ -93,19 +103,14 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
           <div className="mt-4 flex flex-wrap gap-2 text-xs">
             <span className="chip">Data range: {coinInfo.earliest_date} → {coinInfo.latest_date}</span>
             <span className="chip">Latest close: ${coinInfo.latest_close.toLocaleString('en-US', { maximumFractionDigits: 2 })}</span>
-            <span className="chip">Model: XGBoost · lags=7</span>
-            {data?.features && (
-              <span className="chip text-cyan-glow">
-                Features: {data.features.join(' + ')}
-              </span>
-            )}
+            <span className="chip">Lookback: 30 days · Interval: 1d</span>
           </div>
         )}
         <p className="mt-3 text-xs text-slate-500 leading-relaxed">
-          For each day in the selected window the model predicts using the{' '}
-          <span className="text-slate-300 font-medium">previous 7 actual days</span> of log-returns.
-          The model is trained strictly on data before your start date, so the window is fully
-          unseen by the model.
+          All three models run on click. Each uses its own{' '}
+          <span className="text-slate-300 font-medium">30-day feature window</span>{' '}
+          (ending the day before each eval date) to predict next-day log return.
+          The autoregressive line feeds each day's prediction into the next window.
         </p>
       </div>
 
@@ -121,72 +126,113 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
 
       {data && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MetricCard
-              label="Days"
-              value={days}
-              accent="cyan"
-              icon={Activity}
+          {/* Model filter + training note */}
+          <div className="card flex flex-wrap items-center gap-4 justify-between">
+            <ModelFilter
+              models={availableModels}
+              selected={selectedModel}
+              onChange={setSelectedModel}
             />
+            {data.training_note && (
+              <p className="text-xs text-slate-500 max-w-lg">{data.training_note}</p>
+            )}
+          </div>
+
+          {/* Metrics for selected model */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <MetricCard label="Days" value={days} accent="cyan" icon={Activity} />
             <MetricCard
               label="Direction accuracy"
-              value={`${(data.direction_accuracy * 100).toFixed(1)}%`}
+              value={modelResult ? `${(modelResult.direction_accuracy * 100).toFixed(1)}%` : '—'}
               sub={`Over ${days} days`}
-              accent={data.direction_accuracy >= 0.5 ? 'green' : 'red'}
+              accent={modelResult?.direction_accuracy >= 0.5 ? 'green' : 'red'}
               icon={Target}
             />
             <MetricCard
               label="Price MAPE"
-              value={Number.isFinite(data.mape) ? `${data.mape.toFixed(2)}%` : '—'}
+              value={modelResult && Number.isFinite(modelResult.mape) ? `${modelResult.mape.toFixed(2)}%` : '—'}
               sub="Mean absolute % error"
               accent="accent"
               icon={Percent}
             />
             <MetricCard
               label="RMSE (log return)"
-              value={Number.isFinite(data.rmse_log_ret) ? data.rmse_log_ret.toFixed(5) : '—'}
-              sub={`Price RMSE: ${Number.isFinite(data.rmse_price) ? '$' + data.rmse_price.toFixed(2) : '—'}`}
+              value={modelResult && Number.isFinite(modelResult.rmse_log_ret) ? modelResult.rmse_log_ret.toFixed(5) : '—'}
+              sub={`Price RMSE: ${modelResult && Number.isFinite(modelResult.rmse_price) ? '$' + modelResult.rmse_price.toFixed(2) : '—'}`}
               accent="cyan"
               icon={TrendingUp}
             />
           </div>
 
+          {/* All-model metric comparison */}
+          <div className="card">
+            <h3 className="font-semibold text-sm mb-3">Model comparison · direction accuracy</h3>
+            <div className="grid grid-cols-3 gap-3">
+              {availableModels.map((m) => {
+                const mr = data.models[m]
+                const acc = mr?.direction_accuracy ?? 0
+                return (
+                  <button
+                    key={m}
+                    onClick={() => setSelectedModel(m)}
+                    className={`rounded-lg p-3 border text-left transition-all ${
+                      m === selectedModel ? 'border-white/20 bg-white/5' : 'border-white/5 bg-white/[0.02] hover:bg-white/5'
+                    }`}
+                  >
+                    <div className="text-xs text-slate-400 mb-1">{MODEL_LABELS[m]}</div>
+                    <div className="text-lg font-bold" style={{ color: MODEL_STROKE[m] }}>
+                      {(acc * 100).toFixed(1)}%
+                    </div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      RMSE log: {mr?.rmse_log_ret?.toFixed(5) ?? '—'}
+                    </div>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Price chart */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-3">
+              <h3 className="font-semibold">Actual vs. Predicted · {coin}/USDT · {MODEL_LABELS[selectedModel]}</h3>
+              <div className="text-xs text-slate-400">{start} → {end}</div>
+            </div>
+            <p className="text-xs text-slate-500 mb-3">
+              <span style={{ color: stroke }} className="font-medium">Solid line (1-step):</span>{' '}
+              each day uses the previous 30 actual days as input — most accurate.{' '}
+              <span className="text-amber-300 font-medium">Dashed line (autoregressive):</span>{' '}
+              seeds from actual data at {start}, then feeds its own predictions forward.
+            </p>
+            <PriceChart
+              data={points}
+              showActual
+              showAutoregressive
+              predictionColor={stroke}
+              predictionLabel={`${MODEL_LABELS[selectedModel]} 1-step`}
+            />
+          </div>
+
+          {/* Log return chart */}
           <div className="card">
             <div className="flex items-center justify-between mb-1">
-              <h3 className="font-semibold">Actual vs. Predicted · {coin}/USDT</h3>
+              <h3 className="font-semibold">Daily log return · Actual vs. {MODEL_LABELS[selectedModel]}</h3>
               <div className="text-xs text-slate-400">
-                {start} → {end}
+                Direction accuracy:{' '}
+                <span className="text-slate-200 font-semibold">
+                  {modelResult ? `${(modelResult.direction_accuracy * 100).toFixed(1)}%` : '—'}
+                </span>
               </div>
             </div>
             <p className="text-xs text-slate-500 mb-3">
-              <span className="text-purple-300 font-medium">Purple (1-step-ahead prediction):</span>{' '}
-              each day uses the previous <strong>7 actual days</strong> as input. Highly accurate,
-              but because daily log-returns are small the line stays close to the actual price and
-              can look "lagged" by one day.{' '}
-              <span className="text-amber-300 font-medium">Yellow dashed (autoregressive forecast):</span>{' '}
-              only sees actual data at the start, then feeds its own predictions back as input —
-              looks like a "pure forecast" but can drift from reality over time.
+              Green/red bars = actual daily return. Colored line = model prediction. Matching signs = correct direction call.
             </p>
-            <PriceChart data={data.points} showActual showAutoregressive />
+            <LogRetChart data={points} predictionColor={stroke} />
           </div>
 
+          {/* Daily detail table */}
           <div className="card">
-            <div className="flex items-center justify-between mb-1">
-              <h3 className="font-semibold">Daily log return · Actual vs. Predicted</h3>
-              <div className="text-xs text-slate-400">
-                Direction accuracy: <span className="text-slate-200 font-semibold">{(data.direction_accuracy * 100).toFixed(1)}%</span>
-              </div>
-            </div>
-            <p className="text-xs text-slate-500 mb-3">
-              Green/red bars show the <em>actual</em> daily log return
-              (green = up, red = down). The purple line is what the model predicted.
-              When the bar and line share the same sign, the model called the direction correctly.
-            </p>
-            <LogRetChart data={data.points} />
-          </div>
-
-          <div className="card">
-            <h3 className="font-semibold mb-3 text-sm">Daily detail</h3>
+            <h3 className="font-semibold mb-3 text-sm">Daily detail · {MODEL_LABELS[selectedModel]}</h3>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
@@ -201,7 +247,7 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {data.points.map((p) => {
+                  {points.map((p) => {
                     const diff = p.predicted_close - p.actual_close
                     const diffPct = p.actual_close ? (diff / p.actual_close) * 100 : 0
                     const sameDir = Math.sign(p.actual_log_ret) === Math.sign(p.predicted_log_ret)
@@ -237,6 +283,7 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
       {!data && !error && !loading && coinInfo && (
         <div className="card text-center text-slate-400 py-12">
           Pick a date range and click <span className="text-slate-200 font-medium">Compare</span>.
+          All models run simultaneously.
         </div>
       )}
     </div>

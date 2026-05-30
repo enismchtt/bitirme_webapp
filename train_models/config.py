@@ -5,8 +5,8 @@ from pathlib import Path
 # DATASET PATHS
 # ============================================================
 
-BTC_DATASET_PATH = "../train_dataset/BTC_dataset.csv"
-ETH_DATASET_PATH = "../train_dataset/ETH_dataset.csv"
+BTC_DATASET_PATH = "./train_dataset/BTC_dataset.csv"
+ETH_DATASET_PATH = "./train_dataset/ETH_dataset.csv"
 
 
 # ============================================================

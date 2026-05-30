@@ -20,8 +20,8 @@ logger = logging.getLogger("webapp")
 
 app = FastAPI(
     title="Crypto Prediction Dashboard API",
-    description="XGBoost-based 1-day forecasting with Gemini interpretation.",
-    version="1.0.0",
+    description="Multi-model 1-day forecasting (XGBoost · LSTM · CNN-LSTM) with Gemini interpretation.",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -33,7 +33,7 @@ app.add_middleware(
 )
 
 
-# ---------- Schemas ----------
+# ── Schemas ────────────────────────────────────────────────────────────────
 
 class CoinInfo(BaseModel):
     symbol: str
@@ -42,26 +42,37 @@ class CoinInfo(BaseModel):
     latest_close: float
 
 
+# Historical
+
 class HistoricalPointOut(BaseModel):
     date: str
     actual_close: float
-    predicted_close: float
     actual_log_ret: float
+    predicted_close: float
     predicted_log_ret: float
     predicted_close_ar: float
     predicted_log_ret_ar: float
 
 
-class HistoricalResponse(BaseModel):
-    coin: str
-    timeframe: str
-    points: list[HistoricalPointOut]
+class HistoricalModelOut(BaseModel):
+    features: list[str]
     rmse_log_ret: float
     rmse_price: float
     direction_accuracy: float
     mape: float
-    features: list[str]
+    points: list[HistoricalPointOut]
 
+
+class HistoricalResponse(BaseModel):
+    coin: str
+    timeframe: str
+    start: str
+    end: str
+    training_note: str | None
+    models: dict[str, HistoricalModelOut]
+
+
+# Forecast
 
 class ForecastPointOut(BaseModel):
     date: str
@@ -69,14 +80,22 @@ class ForecastPointOut(BaseModel):
     predicted_log_ret: float
 
 
+class ForecastModelOut(BaseModel):
+    features: list[str]
+    points: list[ForecastPointOut]
+
+
 class ForecastResponse(BaseModel):
     coin: str
     timeframe: str
+    days: int
     last_known_date: str
     last_known_close: float
-    points: list[ForecastPointOut]
-    features: list[str]
+    training_note: str | None
+    models: dict[str, ForecastModelOut]
 
+
+# Interpret
 
 class InterpretRequest(BaseModel):
     coin: str
@@ -90,7 +109,7 @@ class InterpretResponse(BaseModel):
     provider: str
 
 
-# ---------- Routes ----------
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health() -> dict:
@@ -99,11 +118,7 @@ def health() -> dict:
 
 @app.get("/api/coins")
 def list_coins() -> dict:
-    """Lightweight list of supported coins — does NOT touch Binance.
-
-    The frontend uses this to populate the selector instantly; per-coin
-    metadata is loaded lazily via /api/coins/{symbol}.
-    """
+    """Lightweight coin list — does NOT touch Binance."""
     return {"coins": config.SUPPORTED_COINS}
 
 
@@ -130,7 +145,7 @@ def recent_candles(
     coin: str = Query(..., min_length=2, max_length=8),
     days: int = Query(14, ge=1, le=90),
 ) -> dict:
-    """Raw recent candles (no training). Used as chart context + LLM input."""
+    """Raw recent candles (no inference). Used as chart context + LLM input."""
     symbol = coin.upper()
     if symbol not in config.SUPPORTED_COINS:
         raise HTTPException(status_code=404, detail=f"Unsupported coin: {symbol}")
@@ -169,21 +184,32 @@ def historical(
 
     try:
         result = forecaster.historical_predictions(symbol, start_ts, end_ts)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("Historical forecast failed for %s", symbol)
+        logger.exception("Historical inference failed for %s", symbol)
         raise HTTPException(status_code=500, detail=str(exc))
+
+    models_out: dict[str, HistoricalModelOut] = {}
+    for name, mr in result.models.items():
+        models_out[name] = HistoricalModelOut(
+            features=mr.features,
+            rmse_log_ret=mr.rmse_log_ret,
+            rmse_price=mr.rmse_price,
+            direction_accuracy=mr.direction_accuracy,
+            mape=mr.mape,
+            points=[HistoricalPointOut(**asdict(p)) for p in mr.points],
+        )
 
     return HistoricalResponse(
         coin=result.coin,
         timeframe=result.timeframe,
-        points=[HistoricalPointOut(**asdict(p)) for p in result.points],
-        rmse_log_ret=result.rmse_log_ret,
-        rmse_price=result.rmse_price,
-        direction_accuracy=result.direction_accuracy,
-        mape=result.mape,
-        features=result.features,
+        start=result.start,
+        end=result.end,
+        training_note=result.training_note,
+        models=models_out,
     )
 
 
@@ -197,19 +223,29 @@ def forecast(
         raise HTTPException(status_code=404, detail=f"Unsupported coin: {symbol}")
     try:
         result = forecaster.future_forecast(symbol, days=days)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.exception("Forecast failed for %s", symbol)
         raise HTTPException(status_code=500, detail=str(exc))
 
+    models_out: dict[str, ForecastModelOut] = {}
+    for name, mr in result.models.items():
+        models_out[name] = ForecastModelOut(
+            features=mr.features,
+            points=[ForecastPointOut(**asdict(p)) for p in mr.points],
+        )
+
     return ForecastResponse(
         coin=result.coin,
         timeframe=result.timeframe,
+        days=result.days,
         last_known_date=result.last_known_date,
         last_known_close=result.last_known_close,
-        points=[ForecastPointOut(**asdict(p)) for p in result.points],
-        features=result.features,
+        training_note=result.training_note,
+        models=models_out,
     )
 
 

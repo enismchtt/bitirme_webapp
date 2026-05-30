@@ -48,7 +48,7 @@ export default function App() {
         )}
       </main>
       <footer className="text-center text-xs text-slate-600 py-6">
-        XGBoost · 7-day lags · Hacettepe BBM479 design project
+        Hacettepe BBM479 design project
       </footer>
     </div>
   )

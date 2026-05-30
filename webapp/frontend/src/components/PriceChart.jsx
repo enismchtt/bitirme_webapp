@@ -2,7 +2,6 @@ import {
   ResponsiveContainer, ComposedChart, Area, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ReferenceLine,
 } from 'recharts'
-// Note: `Line` is needed for the dashed autoregressive series.
 
 function fmtNum(v) {
   if (v == null || Number.isNaN(v)) return '—'
@@ -36,6 +35,9 @@ export default function PriceChart({
   showActual = true,
   showAutoregressive = false,
   forecastStartDate = null,
+  predictionColor = '#a78bfa',
+  predictionLabel = '1-step prediction',
+  arColor = '#fbbf24',
   height = 360,
 }) {
   return (
@@ -48,8 +50,8 @@ export default function PriceChart({
               <stop offset="100%" stopColor="#22d3ee" stopOpacity={0} />
             </linearGradient>
             <linearGradient id="predFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#a78bfa" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="#a78bfa" stopOpacity={0} />
+              <stop offset="0%" stopColor={predictionColor} stopOpacity={0.35} />
+              <stop offset="100%" stopColor={predictionColor} stopOpacity={0} />
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 6" />
@@ -62,10 +64,7 @@ export default function PriceChart({
             tickMargin={6}
           />
           <Tooltip content={<CustomTooltip />} />
-          <Legend
-            wrapperStyle={{ paddingTop: 8, fontSize: 12 }}
-            iconType="circle"
-          />
+          <Legend wrapperStyle={{ paddingTop: 8, fontSize: 12 }} iconType="circle" />
           {forecastStartDate && (
             <ReferenceLine
               x={forecastStartDate}
@@ -90,11 +89,11 @@ export default function PriceChart({
           <Area
             type="monotone"
             dataKey="predicted_close"
-            name="1-step-ahead prediction"
-            stroke="#a78bfa"
+            name={predictionLabel}
+            stroke={predictionColor}
             strokeWidth={2}
             fill={showActual ? 'transparent' : 'url(#predFill)'}
-            dot={showActual ? false : { r: 3, fill: '#a78bfa' }}
+            dot={showActual ? false : { r: 3, fill: predictionColor }}
             activeDot={{ r: 4 }}
             connectNulls
           />
@@ -102,8 +101,8 @@ export default function PriceChart({
             <Line
               type="monotone"
               dataKey="predicted_close_ar"
-              name="Autoregressive forecast"
-              stroke="#fbbf24"
+              name="Autoregressive"
+              stroke={arColor}
               strokeWidth={2}
               strokeDasharray="5 4"
               dot={false}

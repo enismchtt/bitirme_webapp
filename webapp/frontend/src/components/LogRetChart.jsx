@@ -23,8 +23,7 @@ function CustomTooltip({ active, payload, label }) {
   )
 }
 
-export default function LogRetChart({ data, height = 280 }) {
-  // Build series: actual log_ret as colored bars, predicted as a line.
+export default function LogRetChart({ data, predictionColor = '#a78bfa', height = 280 }) {
   const chartData = data.map((p) => ({
     date: p.date,
     actual: p.actual_log_ret,
@@ -52,9 +51,9 @@ export default function LogRetChart({ data, height = 280 }) {
             type="monotone"
             dataKey="predicted"
             name="Predicted log return"
-            stroke="#a78bfa"
+            stroke={predictionColor}
             strokeWidth={2.5}
-            dot={{ r: 3, fill: '#a78bfa' }}
+            dot={{ r: 3, fill: predictionColor }}
             activeDot={{ r: 5 }}
           />
         </ComposedChart>
