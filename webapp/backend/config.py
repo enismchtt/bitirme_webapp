@@ -18,8 +18,20 @@ MODELS_DIR = REPO_ROOT / "outputs" / "models"
 
 HISTORY_DAYS = int(os.getenv("HISTORY_DAYS", "1825"))  # 5 years
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+# ── Ollama local LLM ──────────────────────────────────────────────────────
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+# Pick a model that fits in 4 GB RAM: llama3.2:1b, qwen2.5:1.5b, phi3:mini, etc.
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "60"))  # seconds
+
+# Threshold for BUY/SELL consensus signal (% units).
+# The sum of all models' predicted % changes is compared to this:
+#   sum >  threshold  → BUY
+#   sum < -threshold  → SELL
+#   otherwise         → HOLD
+SIGNAL_CONSENSUS_PCT_THRESHOLD = float(
+    os.getenv("SIGNAL_CONSENSUS_PCT_THRESHOLD", "0.05")
+)
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 

@@ -26,7 +26,7 @@ export default function CoinSelector({ coins, value, onChange }) {
   const color = COIN_COLORS[value] || '#7c3aed'
 
   return (
-    <div className="relative" ref={ref}>
+    <div className={`relative ${open ? 'z-50' : 'z-0'}`} ref={ref}>
       <span className="label block mb-1.5">Coin</span>
       {/* button below */}
       <button
@@ -47,7 +47,7 @@ export default function CoinSelector({ coins, value, onChange }) {
         <ChevronDown size={16} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute z-20 mt-2 w-full glass rounded-xl overflow-hidden">
+        <div className="absolute z-50 mt-2 w-full glass rounded-xl overflow-hidden shadow-xl">
           <div className="p-2 border-b border-white/5 flex items-center gap-2">
             <Search size={14} className="text-slate-400" />
             <input

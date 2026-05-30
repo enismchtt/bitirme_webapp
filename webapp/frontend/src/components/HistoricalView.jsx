@@ -79,7 +79,7 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
 
   return (
     <div className="space-y-6">
-      <div className="card">
+      <div className="card relative z-20 overflow-visible">
         <div className="grid md:grid-cols-[1fr_2fr_auto] gap-4 items-end">
           <CoinSelector coins={coins} value={coin} onChange={onCoinChange} />
           <DateRangePicker
@@ -93,7 +93,7 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
           <button
             onClick={run}
             disabled={loading || !start || !end}
-            className="btn btn-primary h-[42px] md:w-40"
+            className="btn btn-action h-[42px] md:w-40"
           >
             <Play size={16} />
             {loading ? 'Running...' : 'Compare'}

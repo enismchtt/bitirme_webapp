@@ -30,7 +30,7 @@ export async function getRecent({ coin, days = 14 }) {
   return data.points
 }
 
-export async function getInterpretation({ coin, recent, forecast }) {
-  const { data } = await api.post('/interpret', { coin, recent, forecast })
+export async function getInterpretation({ coin, recent, models, last_known_close }) {
+  const { data } = await api.post('/interpret', { coin, recent, models, last_known_close })
   return data
 }

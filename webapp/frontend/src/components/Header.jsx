@@ -14,7 +14,7 @@ export default function Header({ tab, onTabChange }) {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight">Crypto Prediction</h1>
-            <p className="text-xs text-slate-400 -mt-0.5">XGBoost · 7-day lags · live Binance data</p>
+            <p className="text-xs text-slate-400 -mt-0.5">30-day lookback · live Binance data</p>
           </div>
         </div>
         <nav className="flex items-center gap-1 p-1 rounded-xl bg-bg-800/60 border border-white/5">

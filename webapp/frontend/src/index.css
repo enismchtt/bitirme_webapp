@@ -38,6 +38,14 @@ body {
            hover:brightness-110 active:brightness-95
            shadow-lg shadow-accent-500/30;
   }
+  /* Action buttons (Compare / Forecast / Interpret): deep purple solid */
+  .btn-action {
+    @apply text-white font-semibold border border-purple-500/30
+           bg-[#3b1d8a]
+           hover:bg-[#4c27ad] active:bg-[#2e1670]
+           shadow-lg shadow-purple-900/50
+           transition-colors duration-150;
+  }
   .input {
     @apply bg-bg-700/60 border border-white/10 rounded-xl px-3 py-2 text-sm
            text-slate-100 placeholder-slate-500 outline-none

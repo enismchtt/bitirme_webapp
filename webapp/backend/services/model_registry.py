@@ -9,6 +9,7 @@ Call ``load_all()`` at startup to detect missing files early.
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -24,14 +25,57 @@ _TORCH_MODELS = {"lstm", "cnn_lstm"}
 _TRAIN_MODELS_DIR = config.REPO_ROOT / "train_models"
 
 _cache: dict[str, dict[str, Any]] = {}
+_train_models_bootstrapped = False
+
+
+def _bootstrap_train_models_modules() -> None:
+    """Load ``train_models/models.py`` without clobbering webapp ``config``.
+
+    Training pickles reference ``models.XGBoostForecastModel``.  That module
+    does ``from config import …`` which must resolve to ``train_models/config.py``,
+    not ``webapp/backend/config.py`` (already imported as ``config``).
+    """
+    global _train_models_bootstrapped
+    if _train_models_bootstrapped:
+        return
+
+    if not _TRAIN_MODELS_DIR.is_dir():
+        raise FileNotFoundError(
+            f"train_models directory not found: {_TRAIN_MODELS_DIR}. "
+            "Expected repo layout: <repo>/train_models/models.py"
+        )
+
+    cfg_path = _TRAIN_MODELS_DIR / "config.py"
+    models_path = _TRAIN_MODELS_DIR / "models.py"
+
+    cfg_spec = importlib.util.spec_from_file_location("_train_models_config", cfg_path)
+    if cfg_spec is None or cfg_spec.loader is None:
+        raise ImportError(f"Cannot load train_models config from {cfg_path}")
+    train_config = importlib.util.module_from_spec(cfg_spec)
+    sys.modules["_train_models_config"] = train_config
+    cfg_spec.loader.exec_module(train_config)
+
+    webapp_config = sys.modules["config"]
+    sys.modules["config"] = train_config
+    try:
+        models_spec = importlib.util.spec_from_file_location("models", models_path)
+        if models_spec is None or models_spec.loader is None:
+            raise ImportError(f"Cannot load train_models models from {models_path}")
+        models_mod = importlib.util.module_from_spec(models_spec)
+        sys.modules["models"] = models_mod
+        models_spec.loader.exec_module(models_mod)
+    finally:
+        sys.modules["config"] = webapp_config
+
+    _train_models_bootstrapped = True
+    logger.debug("Bootstrapped train_models.models for checkpoint load")
 
 
 def _reconstruct_torch(model_name: str, payload: dict[str, Any]) -> None:
     """Reconstruct nn.Module from state_dict and store under ``_model_obj``."""
-    if str(_TRAIN_MODELS_DIR) not in sys.path:
-        sys.path.insert(0, str(_TRAIN_MODELS_DIR))
+    _bootstrap_train_models_modules()
 
-    from models import create_model  # train_models/models.py
+    from models import create_model  # train_models/models.py  # noqa: E402
 
     model = create_model(model_name, input_size=payload["input_size"])
     model.load_state_dict(payload["state_dict"])
@@ -48,6 +92,8 @@ def _load_payload(model_name: str) -> dict[str, Any]:
             "Run train_models/train.py to generate checkpoints first."
         )
 
+    # xg_boost.pt pickles XGBoostForecastModel from train_models/models.py
+    _bootstrap_train_models_modules()
     payload: dict[str, Any] = torch.load(path, map_location="cpu", weights_only=False)
 
     if model_name in _TORCH_MODELS:

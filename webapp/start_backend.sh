@@ -13,7 +13,6 @@ if [ ! -x "$VENV_PY" ]; then
 fi
 
 cd "$SCRIPT_DIR/backend"
-conda 
 if [ ! -f .env ]; then
   echo "[info] backend/.env not found, copying from .env.example."
   cp .env.example .env

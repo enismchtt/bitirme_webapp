@@ -5,6 +5,7 @@ import CoinSelector from './CoinSelector.jsx'
 import PriceChart from './PriceChart.jsx'
 import MetricCard from './MetricCard.jsx'
 import ModelFilter, { MODEL_STROKE, MODEL_LABELS } from './ModelFilter.jsx'
+import InterpretSignalBadge from './InterpretSignalBadge.jsx'
 import { getCoinInfo, getForecast, getInterpretation, getRecent } from '../api.js'
 
 const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm']
@@ -19,6 +20,7 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
 
   const [aiLoading, setAiLoading] = useState(false)
   const [aiText, setAiText] = useState(null)
+  const [aiSignal, setAiSignal] = useState(null)
   const [aiProvider, setAiProvider] = useState(null)
   const [aiError, setAiError] = useState(null)
 
@@ -29,6 +31,7 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
     setCoinInfo(null)
     setForecast(null)
     setAiText(null)
+    setAiSignal(null)
     setError(null)
     getCoinInfo(coin)
       .then((info) => !cancelled && setCoinInfo(info))
@@ -41,6 +44,7 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
     setError(null)
     setForecast(null)
     setAiText(null)
+    setAiSignal(null)
     try {
       const res = await getForecast({ coin, days })
       setForecast(res)
@@ -67,13 +71,24 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
     setAiLoading(true)
     setAiError(null)
     setAiText(null)
-    const modelPoints = forecast.models?.[selectedModel]?.points ?? []
+    setAiSignal(null)
     try {
       const recent = recentActual.length
         ? recentActual
         : await getRecent({ coin, days: 14 })
-      const res = await getInterpretation({ coin, recent, forecast: modelPoints })
+      // Send all models so the LLM can compare them.
+      const allModels = {}
+      for (const m of SUPPORTED_MODELS) {
+        if (forecast.models?.[m]?.points) allModels[m] = forecast.models[m].points
+      }
+      const res = await getInterpretation({
+        coin,
+        recent,
+        models: allModels,
+        last_known_close: forecast.last_known_close,
+      })
       setAiText(res.interpretation)
+      setAiSignal(res.signal ?? null)
       setAiProvider(res.provider)
     } catch (e) {
       setAiError(e?.response?.data?.detail || e.message)
@@ -118,7 +133,7 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
 
   return (
     <div className="space-y-6">
-      <div className="card">
+      <div className="card relative z-20 overflow-visible">
         <div className="grid md:grid-cols-[1fr_auto_auto] gap-4 items-end">
           <CoinSelector coins={coins} value={coin} onChange={onCoinChange} />
           <div>
@@ -132,7 +147,7 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
               className="input w-24 text-center"
             />
           </div>
-          <button onClick={run} disabled={loading} className="btn btn-primary h-[42px] md:w-44">
+          <button onClick={run} disabled={loading} className="btn btn-action h-[42px] md:w-44">
             <Play size={16} />
             {loading ? 'Forecasting...' : 'Forecast Future'}
           </button>
@@ -216,9 +231,8 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
                   <button
                     key={m}
                     onClick={() => setSelectedModel(m)}
-                    className={`rounded-lg p-3 border text-left transition-all ${
-                      m === selectedModel ? 'border-white/20 bg-white/5' : 'border-white/5 bg-white/[0.02] hover:bg-white/5'
-                    }`}
+                    className={`rounded-lg p-3 border text-left transition-all ${m === selectedModel ? 'border-white/20 bg-white/5' : 'border-white/5 bg-white/[0.02] hover:bg-white/5'
+                      }`}
                   >
                     <div className="text-xs text-slate-400 mb-1">{MODEL_LABELS[m]}</div>
                     <div className="text-lg font-bold font-mono" style={{ color: MODEL_STROKE[m] }}>
@@ -289,9 +303,9 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold flex items-center gap-2">
                 <BrainCircuit size={16} className="text-cyan-glow" />
-                AI Interpretation · {MODEL_LABELS[selectedModel]}
+                AI Interpretation · all models
               </h3>
-              <button onClick={runAi} disabled={aiLoading} className="btn btn-primary">
+              <button onClick={runAi} disabled={aiLoading} className="btn btn-action">
                 {aiLoading ? <Loader2 size={16} className="animate-spin" /> : <Sparkles size={16} />}
                 {aiLoading ? 'Generating...' : aiText ? 'Regenerate' : 'Interpret with AI'}
               </button>
@@ -303,17 +317,23 @@ export default function ForecastView({ coins, coin, onCoinChange }) {
             )}
             {!aiText && !aiError && !aiLoading && (
               <p className="text-sm text-slate-400">
-                Sends the selected model's forecast and recent actual data to Gemini (or rule-based fallback)
-                for a natural-language summary with caveats.
+                Sends all three models' forecasts to a local <span className="text-slate-200 font-medium">Ollama</span> instance
+                for a concise buy/sell/hold commentary. If Ollama is not running, a rule-based consensus summary is shown instead.
               </p>
             )}
             {aiText && (
               <>
+                {aiSignal && (
+                  <InterpretSignalBadge
+                    signal={aiSignal}
+                    horizonDays={forecast?.days ?? days}
+                  />
+                )}
                 <div className="prose-ai">
                   <ReactMarkdown>{aiText}</ReactMarkdown>
                 </div>
-                <div className="mt-3 text-[10px] uppercase tracking-wider text-slate-500">
-                  Provider: {aiProvider === 'gemini' ? 'Google Gemini' : 'Rule-based (fallback)'}
+                <div className={`mt-3 text-[10px] uppercase tracking-wider ${aiProvider?.includes('unreachable') || aiProvider?.startsWith('rule') ? 'text-amber-500' : 'text-slate-500'}`}>
+                  Provider: {aiProvider}
                 </div>
               </>
             )}

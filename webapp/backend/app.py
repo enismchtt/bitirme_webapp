@@ -20,7 +20,7 @@ logger = logging.getLogger("webapp")
 
 app = FastAPI(
     title="Crypto Prediction Dashboard API",
-    description="Multi-model 1-day forecasting (XGBoost · LSTM · CNN-LSTM) with Gemini interpretation.",
+    description="Multi-model 1-day forecasting with LLM interpretation.",
     version="2.0.0",
 )
 
@@ -100,20 +100,27 @@ class ForecastResponse(BaseModel):
 class InterpretRequest(BaseModel):
     coin: str
     recent: list[dict] = Field(default_factory=list)
-    forecast: list[dict] = Field(default_factory=list)
+    # All three models' forecast points, keyed by model name.
+    models: dict[str, list[dict]] = Field(default_factory=dict)
+    last_known_close: float = 0.0
 
 
 class InterpretResponse(BaseModel):
     coin: str
     interpretation: str
     provider: str
+    signal: str  # BUY | HOLD | SELL
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "gemini_configured": bool(config.GEMINI_API_KEY)}
+    return {
+        "ok": True,
+        "ollama_url": config.OLLAMA_URL,
+        "ollama_model": config.OLLAMA_MODEL,
+    }
 
 
 @app.get("/api/coins")
@@ -252,6 +259,15 @@ def forecast(
 @app.post("/api/interpret", response_model=InterpretResponse)
 def interpret(req: InterpretRequest) -> InterpretResponse:
     symbol = req.coin.upper()
-    text = interpreter.interpret(symbol, req.recent, req.forecast)
-    provider = "gemini" if config.GEMINI_API_KEY else "rule-based"
-    return InterpretResponse(coin=symbol, interpretation=text, provider=provider)
+    text, provider, signal = interpreter.interpret(
+        coin=symbol,
+        recent=req.recent,
+        models=req.models,
+        last_known_close=req.last_known_close,
+    )
+    return InterpretResponse(
+        coin=symbol,
+        interpretation=text,
+        provider=provider,
+        signal=signal,
+    )
