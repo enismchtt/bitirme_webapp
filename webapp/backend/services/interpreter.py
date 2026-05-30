@@ -38,20 +38,31 @@ def _build_prompt(
     last_known_close: float,
 ) -> str:
     days = max((len(v) for v in models.values()), default=0)
+    thr = config.SIGNAL_CONSENSUS_PCT_THRESHOLD
 
     model_summaries: list[str] = []
+    net_sum = 0.0
     for model_name, points in models.items():
         if not points:
             continue
         final_close = points[-1]["predicted_close"]
-        total_pct = (final_close - last_known_close) / last_known_close * 100
-        direction = "UP" if total_pct > 0 else ("DOWN" if total_pct < 0 else "FLAT")
+        pct = (final_close - last_known_close) / last_known_close * 100
+        net_sum += pct
+        direction = "UP" if pct > 0 else ("DOWN" if pct < 0 else "FLAT")
         daily_log_rets = [p["predicted_log_ret"] for p in points]
         avg_daily = sum(daily_log_rets) / len(daily_log_rets) * 100
         model_summaries.append(
-            f"- {model_name}: {direction} {total_pct:+.2f}% over {len(points)} days "
+            f"- {model_name}: {direction} {pct:+.2f}% over {len(points)} days "
             f"(final ${final_close:,.2f}, avg daily {avg_daily:+.3f}%)"
         )
+
+    # Pre-compute the rule so the LLM sees it explicitly.
+    if net_sum > thr:
+        rule_signal = "BUY"
+    elif net_sum < -thr:
+        rule_signal = "SELL"
+    else:
+        rule_signal = "HOLD"
 
     recent_snippet = json.dumps(
         recent[-5:] if len(recent) > 5 else recent,
@@ -66,27 +77,25 @@ Last known close: ${last_known_close:,.2f}
 Model predictions:
 {chr(10).join(model_summaries)}
 
+Net sum of all model % changes: {net_sum:+.2f}%
+Decision rule: if net sum > +{thr}% → BUY | if net sum < -{thr}% → SELL | otherwise → HOLD
+Calculated signal from the rule: {rule_signal}
+
 Recent actual prices (last ≤5 days):
 {recent_snippet}
 
 STRICT OUTPUT FORMAT — follow exactly:
 
 Line 1 (required, nothing else on this line):
-SIGNAL: BUY
-OR
-SIGNAL: SELL
-OR
-SIGNAL: HOLD
+SIGNAL: {rule_signal}
 
-Choose exactly one of BUY, SELL, or HOLD for a {days}-day horizon based on the model consensus.
-- BUY = models mostly predict price up; actionable lean long.
-- SELL = models mostly predict price down; actionable lean short/reduce.
-- HOLD = mixed or flat; no clear edge.
+(Use the calculated signal above unless you have a strong reason based on the recent price context to override it. If you override, explain why.)
 
 Lines 2 onward: Short commentary (80-120 words):
-- Which models agree or disagree (use % numbers).
-- Why you chose that SIGNAL for the next {days} days.
-- One concrete risk.
+1. State the net sum calculation: list each model's % change, sum them, compare to threshold.
+2. Explain why the signal is {rule_signal} for the next {days} days.
+3. Note which model(s) agree or disagree and by how much.
+4. One concrete risk that could invalidate this signal.
 
 Do not write BUY, SELL, or HOLD anywhere except on line 1 after "SIGNAL:".
 End the last line with: Not financial advice.
@@ -100,10 +109,6 @@ def _consensus_from_models(
     last_known_close: float,
 ) -> str:
     """Sum per-model % changes; BUY if total > threshold, SELL if < -threshold, else HOLD.
-
-    Example: xg_boost -1.60%, lstm -2.75%, cnn_lstm +1.71%
-      → sum = -2.64%  → SELL (if threshold is e.g. 0.05%)
-    This avoids majority-vote ties and weights larger predicted moves properly.
     """
     if last_known_close <= 0:
         return "HOLD"
@@ -231,10 +236,14 @@ def interpret(
 
     try:
         text = _call_ollama(prompt)
+        # Trust the LLM signal — the prompt tells it the net-sum calculation
+        # and the expected signal, so if it overrides it's for a stated reason.
+        # fallback_signal (= math consensus) catches the rare case the model
+        # produces no signal word at all.
         signal = extract_signal(text, fallback=fallback_signal)
         logger.info(
-            "Ollama interpretation OK for %s (%s) → signal=%s",
-            coin, config.OLLAMA_MODEL, signal,
+            "Ollama interpretation OK for %s (%s) → signal=%s (math=%s)",
+            coin, config.OLLAMA_MODEL, signal, fallback_signal,
         )
         return text, f"ollama/{config.OLLAMA_MODEL}", signal
     except requests.exceptions.ConnectionError:
