@@ -55,6 +55,7 @@ BEST_FEATURE_SET: dict[str, list[str]] = {
     "xg_boost": ["rsi", "macd", "log_ret_close"],
     "lstm": ["rsi", "log_ret_close"],
     "cnn_lstm": ["volatility", "log_ret_close"],
+    "tcn": ["log_ret_close"],
 }
 
 
@@ -63,6 +64,7 @@ MODELS_TO_TRAIN = [
     "xg_boost",
     "lstm",
     "cnn_lstm",
+    "tcn",
 ]
 
 
@@ -100,3 +102,11 @@ CNN_LSTM_PARAMS = {
     "lstm_layers": 1,
     "dropout": 0.10,
 }
+
+TCN_PARAMS = {
+        "num_filters": 16,
+        "kernel_size": 5,
+        "num_layers": 4,
+        "dilation_base": 4,
+        "dropout": 0.10,
+    }

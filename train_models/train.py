@@ -15,7 +15,7 @@ from dataset import prepare_data_for_feature_set
 from models import XGBoostForecastModel, create_model
 
 
-TORCH_MODELS = {"lstm", "cnn_lstm"}
+TORCH_MODELS = {"lstm", "cnn_lstm", "tcn"}
 
 
 def set_seed(seed: int) -> None:

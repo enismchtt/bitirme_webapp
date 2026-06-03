@@ -48,9 +48,10 @@ BEST_FEATURE_SET: dict[str, list[str]] = {
     "xg_boost": ["rsi", "macd", "log_ret_close"],
     "lstm": ["rsi", "log_ret_close"],
     "cnn_lstm": ["volatility", "log_ret_close"],
+    "tcn": ["log_ret_close"]
 }
 
-SUPPORTED_MODELS: list[str] = ["xg_boost", "lstm", "cnn_lstm"]
+SUPPORTED_MODELS: list[str] = ["xg_boost", "lstm", "cnn_lstm", "tcn"]
 
 FORECAST_DAYS_MIN = 1
 FORECAST_DAYS_MAX = 30

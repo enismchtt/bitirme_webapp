@@ -21,7 +21,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_TORCH_MODELS = {"lstm", "cnn_lstm"}
+_TORCH_MODELS = {"lstm", "cnn_lstm", "tcn"}
 _TRAIN_MODELS_DIR = config.REPO_ROOT / "train_models"
 
 _cache: dict[str, dict[str, Any]] = {}

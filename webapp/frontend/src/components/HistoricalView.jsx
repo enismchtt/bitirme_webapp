@@ -14,7 +14,7 @@ function shiftDays(dateStr, n) {
   return d.toISOString().slice(0, 10)
 }
 
-const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm']
+const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm', 'tcn']
 
 export default function HistoricalView({ coins, coin, onCoinChange }) {
   const [coinInfo, setCoinInfo] = useState(null)
@@ -167,7 +167,7 @@ export default function HistoricalView({ coins, coin, onCoinChange }) {
           {/* All-model metric comparison */}
           <div className="card">
             <h3 className="font-semibold text-sm mb-3">Model comparison · direction accuracy</h3>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               {availableModels.map((m) => {
                 const mr = data.models[m]
                 const acc = mr?.direction_accuracy ?? 0

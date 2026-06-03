@@ -8,7 +8,7 @@ import ModelFilter, { MODEL_STROKE, MODEL_LABELS } from './ModelFilter.jsx'
 import InterpretSignalBadge from './InterpretSignalBadge.jsx'
 import { getCoinInfo, getForecast, getInterpretation, getRecent } from '../api.js'
 
-const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm']
+const SUPPORTED_MODELS = ['xg_boost', 'lstm', 'cnn_lstm', 'tcn']
 
 export default function ForecastView({ coins, coin, onCoinChange }) {
   const [coinInfo, setCoinInfo] = useState(null)

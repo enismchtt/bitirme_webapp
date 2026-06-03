@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from config import CNN_LSTM_PARAMS, LSTM_PARAMS, XGBOOST_PARAMS
+from config import CNN_LSTM_PARAMS, LSTM_PARAMS, XGBOOST_PARAMS, TCN_PARAMS
 
 
 class XGBoostForecastModel:
@@ -191,7 +191,180 @@ class CNNLSTMForecastModel(nn.Module):
         last_step = lstm_out[:, -1, :]
 
         return self.head(last_step)
+class Chomp1d(nn.Module):
+    """
+    Removes extra timesteps added by causal padding.
 
+    Conv1d padding is used to preserve sequence length, but for causal TCN
+    we must remove the future-looking padded part from the end.
+    """
+
+    def __init__(self, chomp_size: int):
+        super().__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.chomp_size == 0:
+            return x
+        return x[:, :, :-self.chomp_size].contiguous()
+
+
+class TemporalBlock(nn.Module):
+    """
+    One residual TCN block.
+
+    Input shape:
+        [batch_size, channels, time]
+
+    Output shape:
+        [batch_size, out_channels, time]
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dilation: int,
+        dropout: float,
+    ):
+        super().__init__()
+
+        padding = (kernel_size - 1) * dilation
+
+        self.net = nn.Sequential(
+            nn.Conv1d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                dilation=dilation,
+            ),
+            Chomp1d(padding),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+
+            nn.Conv1d(
+                in_channels=out_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                padding=padding,
+                dilation=dilation,
+            ),
+            Chomp1d(padding),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        self.downsample = (
+            nn.Conv1d(in_channels, out_channels, kernel_size=1)
+            if in_channels != out_channels
+            else None
+        )
+
+        self.relu = nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.net(x)
+
+        residual = x if self.downsample is None else self.downsample(x)
+
+        return self.relu(out + residual)
+
+
+class TCNForecastModel(nn.Module):
+    """
+    Temporal Convolutional Network model.
+
+    This model is compatible with the existing training and webapp pipeline.
+
+    Input shape:
+        [batch_size, 30, input_size]
+
+    Output shape:
+        [batch_size, 1]
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        num_filters: int | None = None,
+        kernel_size: int | None = None,
+        num_layers: int | None = None,
+        dilation_base: int | None = None,
+        dropout: float | None = None,
+    ):
+        super().__init__()
+
+        num_filters = (
+            num_filters
+            if num_filters is not None
+            else TCN_PARAMS["num_filters"]
+        )
+
+        kernel_size = (
+            kernel_size
+            if kernel_size is not None
+            else TCN_PARAMS["kernel_size"]
+        )
+
+        num_layers = (
+            num_layers
+            if num_layers is not None
+            else TCN_PARAMS["num_layers"]
+        )
+
+        dilation_base = (
+            dilation_base
+            if dilation_base is not None
+            else TCN_PARAMS["dilation_base"]
+        )
+
+        dropout = (
+            dropout
+            if dropout is not None
+            else TCN_PARAMS["dropout"]
+        )
+
+        layers = []
+
+        for layer_idx in range(num_layers):
+            dilation = dilation_base ** layer_idx
+
+            in_channels = input_size if layer_idx == 0 else num_filters
+            out_channels = num_filters
+
+            layers.append(
+                TemporalBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    dropout=dropout,
+                )
+            )
+
+        self.tcn = nn.Sequential(*layers)
+
+        self.head = nn.Sequential(
+            nn.Linear(num_filters, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Input: [batch, time, features]
+        x = x.transpose(1, 2)
+        # After transpose: [batch, features, time]
+
+        x = self.tcn(x)
+        # After TCN: [batch, num_filters, time]
+
+        last_step = x[:, :, -1]
+        # Last timestep representation: [batch, num_filters]
+
+        return self.head(last_step)
 
 def create_model(model_name: str, input_size: int | None = None):
     """
@@ -205,6 +378,9 @@ def create_model(model_name: str, input_size: int | None = None):
 
     CNN-LSTM:
         create_model("cnn_lstm", input_size=2)
+    
+    TCN:
+        create_model("tcn", input_size=2)
     """
     if model_name == "xg_boost":
         return XGBoostForecastModel()
@@ -218,5 +394,10 @@ def create_model(model_name: str, input_size: int | None = None):
         if input_size is None:
             raise ValueError("input_size is required for CNN-LSTM.")
         return CNNLSTMForecastModel(input_size=input_size)
+    
+    if model_name == "tcn":
+        if input_size is None:
+            raise ValueError("input_size is required for TCN.")
+        return TCNForecastModel(input_size=input_size)
 
     raise ValueError(f"Unknown model_name: {model_name}")
